@@ -12,3 +12,60 @@ CREATE SCHEMA silver;
 Go
 CREATE SCHEMA gold; 
 Go
+
+--Create DDL for tables
+IF OBJECT_ID('bronze.diabetes_data', 'U') IS NOT NULL
+    DROP TABLE bronze.diabetes_data;
+GO
+
+CREATE TABLE bronze.diabetes_data (
+    gender               NVARCHAR(50),
+    age                  FLOAT,
+    hypertension         INT,
+    heart_disease        INT,
+    smoking_history      NVARCHAR(50),
+    bmi                  FLOAT,
+    HbA1c_level          FLOAT,
+    blood_glucose_level  INT,
+    diabetes             INT
+);
+GO
+
+IF OBJECT_ID('bronze.heart_disease_data', 'U') IS NOT NULL
+    DROP TABLE bronze.heart_disease_data;
+GO
+
+CREATE TABLE bronze.heart_disease_data (
+    age         INT,
+    sex         INT,
+    cp          INT,
+    trestbps    INT,
+    chol        INT,
+    fbs         INT,
+    restecg     INT,
+    thalach     INT,
+    exang       INT,
+    oldpeak     FLOAT,
+    slope       INT,
+    ca          INT,
+    thal        INT,
+    target      INT
+);
+GO
+
+IF OBJECT_ID('bronze.hypertension_data', 'U') IS NOT NULL
+    DROP TABLE bronze.hypertension_data;
+GO
+
+CREATE TABLE bronze.hypertension_data (
+    age                INT,
+    gender             NVARCHAR(50),
+    systolic_bp        INT,
+    diastolic_bp       INT,
+    cholesterol        INT,
+    bmi                FLOAT,
+    smoking_status     NVARCHAR(50),
+    physical_activity  NVARCHAR(50),
+    hypertension       INT
+);
+GO
