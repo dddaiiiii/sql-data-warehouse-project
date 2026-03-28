@@ -29,8 +29,8 @@ CREATE TABLE bronze.diabetes (
 );
 GO
 
-IF OBJECT_ID('bronze.diabetes', 'U') IS NOT NULL
-    DROP TABLE bronze.diabetes;
+IF OBJECT_ID('bronze.heart', 'U') IS NOT NULL
+    DROP TABLE bronze.heart;
 GO
 
 CREATE TABLE bronze.heart (
@@ -58,8 +58,8 @@ CREATE TABLE bronze.heart (
 );
 GO
 
-IF OBJECT_ID('bronze.diabetes', 'U') IS NOT NULL
-    DROP TABLE bronze.diabetes;
+IF OBJECT_ID('bronze.hypertension', 'U') IS NOT NULL
+    DROP TABLE bronze.hypertension;
 GO
 
 CREATE TABLE bronze.hypertension ( 
