@@ -1,0 +1,6 @@
+SELECT
+    fh.*,
+    dc.disease_name
+FROM gold.fact_health fh
+LEFT JOIN gold.dim_conditions dc
+    ON fh.condition_key = dc.condition_key;
