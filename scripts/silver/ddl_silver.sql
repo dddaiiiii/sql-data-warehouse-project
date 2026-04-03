@@ -24,7 +24,6 @@ CREATE TABLE silver.diabetes (
 );
 GO
 
-
 -- =============================================
 -- 2. HEART
 -- =============================================
@@ -44,10 +43,10 @@ CREATE TABLE silver.heart (
     diabetes             VARCHAR(10),
     bmi                  FLOAT,
     high_blood_pressure  VARCHAR(10),
-    low_hdl_cholesterol  VARCHAR(10),
-    high_ldl_cholesterol VARCHAR(10),
+    hdl_status           VARCHAR(10),   -- low_hdl_cholesterol (Yes/No → Good/Poor)
+    ldl_status           VARCHAR(10),   -- high_ldl_cholesterol (Yes/No → Normal/High)
     alcohol_consumption  VARCHAR(20),
-    stress_level         VARCHAR(20),
+    stress_level         VARCHAR(10),   -- (High/Medium/Low)
     sleep_hours          FLOAT,
     sugar_consumption    VARCHAR(20),
     triglyceride_level   FLOAT,
@@ -58,7 +57,6 @@ CREATE TABLE silver.heart (
     disease_category     VARCHAR(20)
 );
 GO
-
 
 -- =============================================
 -- 3. HYPERTENSION
@@ -80,12 +78,12 @@ CREATE TABLE silver.hypertension (
     physical_activity_level VARCHAR(20),
     family_history          VARCHAR(10),
     diabetes                VARCHAR(10),
-    stress_level            INT,
+    stress_level            VARCHAR(10), --(1-9 → Low/Medium/High)
     salt_intake             FLOAT,
     sleep_duration          FLOAT,
     heart_rate              INT,
-    ldl                     INT,
-    hdl                     INT,
+    ldl_status              VARCHAR(10), -- (< 100 → Normal / >= 100 → High)
+    hdl_status              VARCHAR(10), -- (>= 60 → Good / < 60 → Poor)
     triglycerides           INT,
     glucose                 INT,
     gender                  VARCHAR(10),
