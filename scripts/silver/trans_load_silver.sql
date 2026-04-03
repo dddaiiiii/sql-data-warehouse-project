@@ -40,7 +40,9 @@ BEGIN
             HbA1c_level                                 AS hba1c_level,
             blood_glucose_level,
             diabetes,
-            'Diabetes'                                  AS disease_category
+            CASE WHEN diabetes = 1 THEN 'Diabetes'
+            ELSE 'Healthy'
+            END AS disease_category
         FROM (
             SELECT *,
                 ROW_NUMBER() OVER (
@@ -72,8 +74,8 @@ BEGIN
             gender, age, blood_pressure, cholesterol_level,
             exercise_habits, smoking, family_heart_disease,
             diabetes, bmi, high_blood_pressure,
-            hdl_status,           -- كانت low_hdl_cholesterol
-            ldl_status,           -- كانت high_ldl_cholesterol
+            hdl_status,           -- low_hdl_cholesterol
+            ldl_status,           -- high_ldl_cholesterol
             alcohol_consumption, stress_level,
             sleep_hours, sugar_consumption, triglyceride_level,
             fasting_blood_sugar, crp_level, homocysteine_level,
@@ -109,7 +111,7 @@ BEGIN
                  ELSE TRIM(Alcohol_Consumption)
             END                                                 AS alcohol_consumption,
 
-            -- stress_level بيفضل كما هو (High/Medium/Low)
+            -- stress_level (High/Medium/Low)
             ISNULL(TRIM(Stress_Level), 'Unknown')               AS stress_level,
 
             Sleep_Hours                                         AS sleep_hours,
@@ -119,7 +121,9 @@ BEGIN
             CRP_Level                                           AS crp_level,
             Homocysteine_Level                                  AS homocysteine_level,
             TRIM(Heart_Disease_Status)                          AS heart_disease_status,
-            'Heart Disease'                                     AS disease_category
+                CASE WHEN heart_disease_status = 'Yes' THEN 'Heart Disease'
+                ELSE 'Healthy'
+                END AS disease_category
         FROM bronze.heart;
         -- RESULTS = 10,000 rows
 
@@ -187,7 +191,9 @@ BEGIN
             TRIM(Education_Level)                       AS education_level,
             TRIM(Employment_Status)                     AS employment_status,
             TRIM(Hypertension)                          AS hypertension,
-            'Hypertension'                              AS disease_category
+            CASE WHEN hypertension = 'High' THEN 'Hypertension'
+            ELSE 'Healthy'
+            END AS disease_category
         FROM bronze.hypertension;
         -- RESULTS = 174,982 rows
 
@@ -214,6 +220,21 @@ BEGIN
 END
 GO
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+            
 
 -- =============================================
 -- Quality Check
@@ -256,3 +277,23 @@ SELECT DISTINCT hdl_status FROM silver.hypertension;            -- 'Good' / 'Poo
 
 -- Check ldl_status values in hypertension
 SELECT DISTINCT ldl_status FROM silver.hypertension;            -- 'Normal' / 'High'
+
+
+-- =============================================
+SELECT DISTINCT disease_category, COUNT(*) AS count
+FROM silver.diabetes
+GROUP BY disease_category;
+-- Healthy  = 87,664
+-- Diabetes = 8,482
+
+SELECT DISTINCT disease_category, COUNT(*) AS count
+FROM silver.heart
+GROUP BY disease_category;
+-- Heart Disease = 2,000
+-- Healthy       = 8,000
+
+SELECT DISTINCT disease_category, COUNT(*) AS count
+FROM silver.hypertension
+GROUP BY disease_category;
+-- Hypertension = 125,781
+-- Healthy      = 49,201
