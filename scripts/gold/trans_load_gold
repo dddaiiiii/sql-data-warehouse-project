@@ -1,0 +1,480 @@
+/*
+===============================================================================
+Stored Procedure: Load Gold Layer (Silver -> Gold)
+Medallion Architecture - Medical Data Warehouse
+
+Pipeline:
+  1. Load dimensions (dim_profile, dim_disease)
+  2. Build lookup tables (AVG/MODE per composite_key per dataset)
+  3. Load fact_patient (3 parts: each dataset LEFT JOIN with other lookups)
+  4. Load patient_flat (denormalized from star schema)
+  5. Partial matching (fill remaining NULLs: 4-col match → 3-col → global)
+
+Usage: EXEC gold.load_gold;
+===============================================================================
+*/
+
+CREATE OR ALTER PROCEDURE gold.load_gold AS
+BEGIN
+    DECLARE @start_time DATETIME, @batch_start_time DATETIME;
+    BEGIN TRY
+        SET @batch_start_time = GETDATE();
+        PRINT '==========================================';
+        PRINT 'Loading Gold Layer';
+        PRINT '==========================================';
+
+
+        -- ============================================
+        -- STEP 0: CLEANUP (fact first due to FK)
+        -- ============================================
+        PRINT '>> Cleaning up...';
+        DELETE FROM gold.patient_flat;
+        DELETE FROM gold.fact_patient;
+        DELETE FROM gold.dim_profile;
+        DELETE FROM gold.dim_disease;
+        DBCC CHECKIDENT ('gold.dim_profile', RESEED, 0);
+        DBCC CHECKIDENT ('gold.dim_disease', RESEED, 0);
+        DBCC CHECKIDENT ('gold.fact_patient', RESEED, 0);
+
+
+        -- ============================================
+        -- STEP 1: LOAD DIMENSIONS
+        -- ============================================
+        SET @start_time = GETDATE();
+
+        -- dim_profile: all unique composite keys across 3 datasets
+        INSERT INTO gold.dim_profile (composite_key, age_level, gender, bmi_level, smoking, diabetes)
+        SELECT DISTINCT composite_key, age_level, gender, bmi_level, smoking, diabetes
+        FROM (
+            SELECT composite_key, age_level, gender, bmi_level, smoking, diabetes FROM silver.diabetes
+            UNION
+            SELECT composite_key, age_level, gender, bmi_level, smoking, diabetes FROM silver.heart
+            UNION
+            SELECT composite_key, age_level, gender, bmi_level, smoking, diabetes FROM silver.hypertension
+        ) all_profiles;
+        PRINT '>> dim_profile: ' + CAST(@@ROWCOUNT AS NVARCHAR) + ' profiles';
+
+        -- dim_disease: 4 classes
+        INSERT INTO gold.dim_disease (disease_category)
+        VALUES ('Healthy'), ('Diabetes'), ('Heart'), ('Hypertension');
+        PRINT '>> dim_disease: 4 categories';
+        PRINT '>> Dimensions loaded: ' + CAST(DATEDIFF(SECOND, @start_time, GETDATE()) AS NVARCHAR) + 's';
+
+
+        -- ============================================
+        -- STEP 2: BUILD LOOKUP TABLES
+        -- Pre-compute AVG (numerical) and MODE (categorical) per composite_key
+        -- ============================================
+        PRINT '>> Building lookup tables...';
+
+        -- Diabetes: numerical averages
+        IF OBJECT_ID('tempdb..#d_num') IS NOT NULL DROP TABLE #d_num;
+        SELECT composite_key,
+            AVG(CAST(hypertension AS FLOAT)) AS avg_hypertension,
+            AVG(CAST(heart_disease AS FLOAT)) AS avg_heart_disease,
+            AVG(HbA1c_level) AS avg_HbA1c,
+            AVG(CAST(glucose AS FLOAT)) AS avg_glucose
+        INTO #d_num FROM silver.diabetes GROUP BY composite_key;
+
+        -- Heart: numerical averages
+        IF OBJECT_ID('tempdb..#h_num') IS NOT NULL DROP TABLE #h_num;
+        SELECT composite_key,
+            AVG(cholesterol) AS avg_cholesterol, AVG(sleep_hours) AS avg_sleep,
+            AVG(triglycerides) AS avg_trig, AVG(glucose) AS avg_glucose,
+            AVG(blood_pressure) AS avg_bp, AVG(crp_level) AS avg_crp,
+            AVG(homocysteine_level) AS avg_homo
+        INTO #h_num FROM silver.heart GROUP BY composite_key;
+
+        -- Heart: categorical modes
+        IF OBJECT_ID('tempdb..#h_cat') IS NOT NULL DROP TABLE #h_cat;
+        WITH hm AS (
+            SELECT composite_key, physical_activity, family_history, stress_level,
+                low_hdl_cholesterol, high_ldl_cholesterol, high_blood_pressure, sugar_consumption,
+                ROW_NUMBER() OVER (PARTITION BY composite_key ORDER BY COUNT(*) DESC) AS rn
+            FROM silver.heart
+            GROUP BY composite_key, physical_activity, family_history, stress_level,
+                low_hdl_cholesterol, high_ldl_cholesterol, high_blood_pressure, sugar_consumption
+        )
+        SELECT composite_key,
+            physical_activity AS mode_activity, family_history AS mode_family,
+            stress_level AS mode_stress, low_hdl_cholesterol AS mode_low_hdl,
+            high_ldl_cholesterol AS mode_high_ldl, high_blood_pressure AS mode_high_bp,
+            sugar_consumption AS mode_sugar
+        INTO #h_cat FROM hm WHERE rn = 1;
+
+        -- Hypertension: numerical averages
+        IF OBJECT_ID('tempdb..#hy_num') IS NOT NULL DROP TABLE #hy_num;
+        SELECT composite_key,
+            AVG(CAST(cholesterol AS FLOAT)) AS avg_cholesterol, AVG(sleep_hours) AS avg_sleep,
+            AVG(CAST(triglycerides AS FLOAT)) AS avg_trig, AVG(CAST(glucose AS FLOAT)) AS avg_glucose,
+            AVG(CAST(systolic_bp AS FLOAT)) AS avg_sys, AVG(CAST(diastolic_bp AS FLOAT)) AS avg_dia,
+            AVG(alcohol_intake) AS avg_alc, AVG(salt_intake) AS avg_salt,
+            AVG(CAST(heart_rate AS FLOAT)) AS avg_hr, AVG(CAST(hdl AS FLOAT)) AS avg_hdl,
+            AVG(CAST(ldl AS FLOAT)) AS avg_ldl
+        INTO #hy_num FROM silver.hypertension GROUP BY composite_key;
+
+        -- Hypertension: categorical modes
+        IF OBJECT_ID('tempdb..#hy_cat') IS NOT NULL DROP TABLE #hy_cat;
+        WITH hym AS (
+            SELECT composite_key, physical_activity, family_history, stress_level,
+                low_hdl_cholesterol, high_ldl_cholesterol, education_level, employment_status,
+                ROW_NUMBER() OVER (PARTITION BY composite_key ORDER BY COUNT(*) DESC) AS rn
+            FROM silver.hypertension
+            GROUP BY composite_key, physical_activity, family_history, stress_level,
+                low_hdl_cholesterol, high_ldl_cholesterol, education_level, employment_status
+        )
+        SELECT composite_key,
+            physical_activity AS mode_activity, family_history AS mode_family,
+            stress_level AS mode_stress, low_hdl_cholesterol AS mode_low_hdl,
+            high_ldl_cholesterol AS mode_high_ldl, education_level AS mode_edu,
+            employment_status AS mode_emp
+        INTO #hy_cat FROM hym WHERE rn = 1;
+
+        PRINT '>> Lookup tables built';
+
+
+        -- ============================================
+        -- STEP 3: LOAD FACT TABLE (3 parts)
+        -- Each dataset LEFT JOIN with lookups from other 2 datasets
+        -- ============================================
+        SET @start_time = GETDATE();
+        PRINT '>> Loading fact_patient...';
+
+        -- Part A: Diabetes patients
+        INSERT INTO gold.fact_patient (
+            profile_key, disease_key, source_dataset, age, age_normalized, bmi,
+            hypertension, heart_disease, HbA1c_level,
+            glucose, cholesterol, sleep_hours, triglycerides,
+            physical_activity, family_history, stress_level, low_hdl_cholesterol, high_ldl_cholesterol,
+            blood_pressure, high_blood_pressure, sugar_consumption, crp_level, homocysteine_level,
+            systolic_bp, diastolic_bp, alcohol_intake, salt_intake, heart_rate, hdl, ldl,
+            education_level, employment_status
+        )
+        SELECT
+            p.profile_key, dd.disease_key, 'diabetes', d.age, d.age_normalized, d.bmi,
+            -- Own columns
+            d.hypertension, d.heart_disease, d.HbA1c_level,
+            d.glucose,
+            -- Unified: prefer Heart lookup, fallback Hypertension lookup
+            COALESCE(hn.avg_cholesterol, hyn.avg_cholesterol),
+            COALESCE(hn.avg_sleep, hyn.avg_sleep),
+            COALESCE(hn.avg_trig, hyn.avg_trig),
+            COALESCE(hc.mode_activity, hyc.mode_activity),
+            COALESCE(hc.mode_family, hyc.mode_family),
+            COALESCE(hc.mode_stress, hyc.mode_stress),
+            COALESCE(hc.mode_low_hdl, hyc.mode_low_hdl),
+            COALESCE(hc.mode_high_ldl, hyc.mode_high_ldl),
+            -- Heart-only
+            hn.avg_bp, hc.mode_high_bp, hc.mode_sugar, hn.avg_crp, hn.avg_homo,
+            -- Hypertension-only
+            hyn.avg_sys, hyn.avg_dia, hyn.avg_alc, hyn.avg_salt, hyn.avg_hr,
+            hyn.avg_hdl, hyn.avg_ldl, hyc.mode_edu, hyc.mode_emp
+        FROM silver.diabetes d
+        INNER JOIN gold.dim_profile p ON d.composite_key = p.composite_key
+        INNER JOIN gold.dim_disease dd ON d.disease_category = dd.disease_category
+        LEFT JOIN #h_num hn ON d.composite_key = hn.composite_key
+        LEFT JOIN #h_cat hc ON d.composite_key = hc.composite_key
+        LEFT JOIN #hy_num hyn ON d.composite_key = hyn.composite_key
+        LEFT JOIN #hy_cat hyc ON d.composite_key = hyc.composite_key;
+        PRINT '>>   Diabetes: ' + CAST(@@ROWCOUNT AS NVARCHAR) + ' rows';
+
+        -- Part B: Heart patients
+        INSERT INTO gold.fact_patient (
+            profile_key, disease_key, source_dataset, age, age_normalized, bmi,
+            hypertension, heart_disease, HbA1c_level,
+            glucose, cholesterol, sleep_hours, triglycerides,
+            physical_activity, family_history, stress_level, low_hdl_cholesterol, high_ldl_cholesterol,
+            blood_pressure, high_blood_pressure, sugar_consumption, crp_level, homocysteine_level,
+            systolic_bp, diastolic_bp, alcohol_intake, salt_intake, heart_rate, hdl, ldl,
+            education_level, employment_status
+        )
+        SELECT
+            p.profile_key, dd.disease_key, 'heart', h.age, h.age_normalized, h.bmi,
+            -- From Diabetes lookup
+            dn.avg_hypertension, dn.avg_heart_disease, dn.avg_HbA1c,
+            h.glucose,
+            -- Own + fallback Hypertension
+            COALESCE(h.cholesterol, hyn.avg_cholesterol),
+            COALESCE(h.sleep_hours, hyn.avg_sleep),
+            COALESCE(h.triglycerides, hyn.avg_trig),
+            h.physical_activity, h.family_history, h.stress_level,
+            h.low_hdl_cholesterol, h.high_ldl_cholesterol,
+            -- Own Heart columns
+            h.blood_pressure, h.high_blood_pressure, h.sugar_consumption, h.crp_level, h.homocysteine_level,
+            -- From Hypertension lookup
+            hyn.avg_sys, hyn.avg_dia, hyn.avg_alc, hyn.avg_salt, hyn.avg_hr,
+            hyn.avg_hdl, hyn.avg_ldl, hyc.mode_edu, hyc.mode_emp
+        FROM silver.heart h
+        INNER JOIN gold.dim_profile p ON h.composite_key = p.composite_key
+        INNER JOIN gold.dim_disease dd ON h.disease_category = dd.disease_category
+        LEFT JOIN #d_num dn ON h.composite_key = dn.composite_key
+        LEFT JOIN #hy_num hyn ON h.composite_key = hyn.composite_key
+        LEFT JOIN #hy_cat hyc ON h.composite_key = hyc.composite_key;
+        PRINT '>>   Heart: ' + CAST(@@ROWCOUNT AS NVARCHAR) + ' rows';
+
+        -- Part C: Hypertension patients
+        INSERT INTO gold.fact_patient (
+            profile_key, disease_key, source_dataset, age, age_normalized, bmi,
+            hypertension, heart_disease, HbA1c_level,
+            glucose, cholesterol, sleep_hours, triglycerides,
+            physical_activity, family_history, stress_level, low_hdl_cholesterol, high_ldl_cholesterol,
+            blood_pressure, high_blood_pressure, sugar_consumption, crp_level, homocysteine_level,
+            systolic_bp, diastolic_bp, alcohol_intake, salt_intake, heart_rate, hdl, ldl,
+            education_level, employment_status
+        )
+        SELECT
+            p.profile_key, dd.disease_key, 'hypertension', hy.age, hy.age_normalized, hy.bmi,
+            -- From Diabetes lookup
+            dn.avg_hypertension, dn.avg_heart_disease, dn.avg_HbA1c,
+            hy.glucose,
+            -- Own + fallback Heart
+            COALESCE(hy.cholesterol, hn.avg_cholesterol),
+            COALESCE(hy.sleep_hours, hn.avg_sleep),
+            COALESCE(CAST(hy.triglycerides AS FLOAT), hn.avg_trig),
+            hy.physical_activity, hy.family_history, hy.stress_level,
+            hy.low_hdl_cholesterol, hy.high_ldl_cholesterol,
+            -- From Heart lookup
+            hn.avg_bp, hc.mode_high_bp, hc.mode_sugar, hn.avg_crp, hn.avg_homo,
+            -- Own Hypertension columns
+            hy.systolic_bp, hy.diastolic_bp, hy.alcohol_intake, hy.salt_intake, hy.heart_rate,
+            hy.hdl, hy.ldl, hy.education_level, hy.employment_status
+        FROM silver.hypertension hy
+        INNER JOIN gold.dim_profile p ON hy.composite_key = p.composite_key
+        INNER JOIN gold.dim_disease dd ON hy.disease_category = dd.disease_category
+        LEFT JOIN #d_num dn ON hy.composite_key = dn.composite_key
+        LEFT JOIN #h_num hn ON hy.composite_key = hn.composite_key
+        LEFT JOIN #h_cat hc ON hy.composite_key = hc.composite_key;
+        PRINT '>>   Hypertension: ' + CAST(@@ROWCOUNT AS NVARCHAR) + ' rows';
+
+        PRINT '>> fact_patient: ' + CAST(DATEDIFF(SECOND, @start_time, GETDATE()) AS NVARCHAR) + 's';
+
+
+        -- ============================================
+        -- STEP 4: LOAD FLAT TABLE (from star schema)
+        -- ============================================
+        SET @start_time = GETDATE();
+        PRINT '>> Loading patient_flat...';
+
+        INSERT INTO gold.patient_flat
+        SELECT
+            p.composite_key, p.age_level, p.gender, p.bmi_level, p.smoking, p.diabetes,
+            f.age, f.age_normalized, f.bmi,
+            f.hypertension, f.heart_disease, f.HbA1c_level,
+            f.glucose, f.cholesterol, f.sleep_hours, f.triglycerides,
+            f.physical_activity, f.family_history, f.stress_level,
+            f.low_hdl_cholesterol, f.high_ldl_cholesterol,
+            f.blood_pressure, f.high_blood_pressure, f.sugar_consumption,
+            f.crp_level, f.homocysteine_level,
+            f.systolic_bp, f.diastolic_bp, f.alcohol_intake, f.salt_intake,
+            f.heart_rate, f.hdl, f.ldl,
+            f.education_level, f.employment_status,
+            d.disease_category, f.source_dataset
+        FROM gold.fact_patient f
+        INNER JOIN gold.dim_profile p ON f.profile_key = p.profile_key
+        INNER JOIN gold.dim_disease d ON f.disease_key = d.disease_key;
+
+        PRINT '>> patient_flat: ' + CAST(@@ROWCOUNT AS NVARCHAR) + ' rows, ' + CAST(DATEDIFF(SECOND, @start_time, GETDATE()) AS NVARCHAR) + 's';
+
+
+        -- ============================================
+        -- STEP 5: PARTIAL MATCHING (fill remaining NULLs)
+        -- Level 2: match on 4 cols (gender + bmi_level + smoking + diabetes)
+        -- Level 3: match on 3 cols (gender + bmi_level + diabetes)
+        -- Level 4: global mean/mode (last resort)
+        -- ============================================
+        SET @start_time = GETDATE();
+        PRINT '>> Partial matching: filling remaining NULLs...';
+
+        -- === LEVEL 2: 4-column match (drop age_level) ===
+
+        -- Heart numerical (4-col)
+        ;WITH h4 AS (
+            SELECT gender, bmi_level, smoking, diabetes,
+                AVG(cholesterol) AS v_chol, AVG(sleep_hours) AS v_sleep, AVG(triglycerides) AS v_trig,
+                AVG(blood_pressure) AS v_bp, AVG(crp_level) AS v_crp, AVG(homocysteine_level) AS v_homo
+            FROM silver.heart GROUP BY gender, bmi_level, smoking, diabetes
+        )
+        UPDATE pf SET
+            pf.cholesterol = COALESCE(pf.cholesterol, h4.v_chol),
+            pf.sleep_hours = COALESCE(pf.sleep_hours, h4.v_sleep),
+            pf.triglycerides = COALESCE(pf.triglycerides, h4.v_trig),
+            pf.blood_pressure = COALESCE(pf.blood_pressure, h4.v_bp),
+            pf.crp_level = COALESCE(pf.crp_level, h4.v_crp),
+            pf.homocysteine_level = COALESCE(pf.homocysteine_level, h4.v_homo)
+        FROM gold.patient_flat pf
+        INNER JOIN h4 ON pf.gender = h4.gender AND pf.bmi_level = h4.bmi_level
+            AND pf.smoking = h4.smoking AND pf.diabetes = h4.diabetes
+        WHERE pf.crp_level IS NULL OR pf.blood_pressure IS NULL OR pf.homocysteine_level IS NULL;
+
+        -- Heart categorical (4-col)
+        ;WITH hc4 AS (
+            SELECT gender, bmi_level, smoking, diabetes,
+                physical_activity, family_history, stress_level,
+                low_hdl_cholesterol, high_ldl_cholesterol, high_blood_pressure, sugar_consumption
+            FROM (
+                SELECT gender, bmi_level, smoking, diabetes,
+                    physical_activity, family_history, stress_level,
+                    low_hdl_cholesterol, high_ldl_cholesterol, high_blood_pressure, sugar_consumption,
+                    ROW_NUMBER() OVER (PARTITION BY gender, bmi_level, smoking, diabetes ORDER BY COUNT(*) DESC) AS rn
+                FROM silver.heart GROUP BY gender, bmi_level, smoking, diabetes,
+                    physical_activity, family_history, stress_level,
+                    low_hdl_cholesterol, high_ldl_cholesterol, high_blood_pressure, sugar_consumption
+            ) t WHERE rn = 1
+        )
+        UPDATE pf SET
+            pf.physical_activity = COALESCE(pf.physical_activity, hc4.physical_activity),
+            pf.family_history = COALESCE(pf.family_history, hc4.family_history),
+            pf.stress_level = COALESCE(pf.stress_level, hc4.stress_level),
+            pf.low_hdl_cholesterol = COALESCE(pf.low_hdl_cholesterol, hc4.low_hdl_cholesterol),
+            pf.high_ldl_cholesterol = COALESCE(pf.high_ldl_cholesterol, hc4.high_ldl_cholesterol),
+            pf.high_blood_pressure = COALESCE(pf.high_blood_pressure, hc4.high_blood_pressure),
+            pf.sugar_consumption = COALESCE(pf.sugar_consumption, hc4.sugar_consumption)
+        FROM gold.patient_flat pf
+        INNER JOIN hc4 ON pf.gender = hc4.gender AND pf.bmi_level = hc4.bmi_level
+            AND pf.smoking = hc4.smoking AND pf.diabetes = hc4.diabetes
+        WHERE pf.physical_activity IS NULL OR pf.high_blood_pressure IS NULL OR pf.sugar_consumption IS NULL;
+
+        -- Diabetes numerical (4-col)
+        ;WITH d4 AS (
+            SELECT gender, bmi_level, smoking, diabetes,
+                AVG(CAST(hypertension AS FLOAT)) AS v_hyp, AVG(CAST(heart_disease AS FLOAT)) AS v_hd,
+                AVG(HbA1c_level) AS v_hba1c
+            FROM silver.diabetes GROUP BY gender, bmi_level, smoking, diabetes
+        )
+        UPDATE pf SET
+            pf.HbA1c_level = COALESCE(pf.HbA1c_level, d4.v_hba1c),
+            pf.hypertension = COALESCE(pf.hypertension, d4.v_hyp),
+            pf.heart_disease = COALESCE(pf.heart_disease, d4.v_hd)
+        FROM gold.patient_flat pf
+        INNER JOIN d4 ON pf.gender = d4.gender AND pf.bmi_level = d4.bmi_level
+            AND pf.smoking = d4.smoking AND pf.diabetes = d4.diabetes
+        WHERE pf.HbA1c_level IS NULL;
+
+        -- Hypertension numerical (4-col)
+        ;WITH hy4 AS (
+            SELECT gender, bmi_level, smoking, diabetes,
+                AVG(CAST(systolic_bp AS FLOAT)) AS v_sys, AVG(CAST(diastolic_bp AS FLOAT)) AS v_dia,
+                AVG(alcohol_intake) AS v_alc, AVG(salt_intake) AS v_salt,
+                AVG(CAST(heart_rate AS FLOAT)) AS v_hr, AVG(CAST(hdl AS FLOAT)) AS v_hdl,
+                AVG(CAST(ldl AS FLOAT)) AS v_ldl
+            FROM silver.hypertension GROUP BY gender, bmi_level, smoking, diabetes
+        )
+        UPDATE pf SET
+            pf.systolic_bp = COALESCE(pf.systolic_bp, hy4.v_sys),
+            pf.diastolic_bp = COALESCE(pf.diastolic_bp, hy4.v_dia),
+            pf.alcohol_intake = COALESCE(pf.alcohol_intake, hy4.v_alc),
+            pf.salt_intake = COALESCE(pf.salt_intake, hy4.v_salt),
+            pf.heart_rate = COALESCE(pf.heart_rate, hy4.v_hr),
+            pf.hdl = COALESCE(pf.hdl, hy4.v_hdl),
+            pf.ldl = COALESCE(pf.ldl, hy4.v_ldl)
+        FROM gold.patient_flat pf
+        INNER JOIN hy4 ON pf.gender = hy4.gender AND pf.bmi_level = hy4.bmi_level
+            AND pf.smoking = hy4.smoking AND pf.diabetes = hy4.diabetes
+        WHERE pf.systolic_bp IS NULL;
+
+        -- Hypertension categorical (4-col)
+        ;WITH hyc4 AS (
+            SELECT gender, bmi_level, smoking, diabetes, education_level, employment_status
+            FROM (
+                SELECT gender, bmi_level, smoking, diabetes, education_level, employment_status,
+                    ROW_NUMBER() OVER (PARTITION BY gender, bmi_level, smoking, diabetes ORDER BY COUNT(*) DESC) AS rn
+                FROM silver.hypertension GROUP BY gender, bmi_level, smoking, diabetes, education_level, employment_status
+            ) t WHERE rn = 1
+        )
+        UPDATE pf SET
+            pf.education_level = COALESCE(pf.education_level, hyc4.education_level),
+            pf.employment_status = COALESCE(pf.employment_status, hyc4.employment_status)
+        FROM gold.patient_flat pf
+        INNER JOIN hyc4 ON pf.gender = hyc4.gender AND pf.bmi_level = hyc4.bmi_level
+            AND pf.smoking = hyc4.smoking AND pf.diabetes = hyc4.diabetes
+        WHERE pf.education_level IS NULL;
+
+        PRINT '>> Level 2 (4-col match) done';
+
+        -- === LEVEL 3: 3-column match (gender + bmi_level + diabetes) ===
+
+        ;WITH h3 AS (
+            SELECT gender, bmi_level, diabetes,
+                AVG(crp_level) AS v_crp, AVG(blood_pressure) AS v_bp, AVG(homocysteine_level) AS v_homo,
+                AVG(cholesterol) AS v_chol, AVG(sleep_hours) AS v_sleep, AVG(triglycerides) AS v_trig
+            FROM silver.heart GROUP BY gender, bmi_level, diabetes
+        )
+        UPDATE pf SET
+            pf.crp_level = COALESCE(pf.crp_level, h3.v_crp),
+            pf.blood_pressure = COALESCE(pf.blood_pressure, h3.v_bp),
+            pf.homocysteine_level = COALESCE(pf.homocysteine_level, h3.v_homo),
+            pf.cholesterol = COALESCE(pf.cholesterol, h3.v_chol),
+            pf.sleep_hours = COALESCE(pf.sleep_hours, h3.v_sleep),
+            pf.triglycerides = COALESCE(pf.triglycerides, h3.v_trig)
+        FROM gold.patient_flat pf
+        INNER JOIN h3 ON pf.gender = h3.gender AND pf.bmi_level = h3.bmi_level AND pf.diabetes = h3.diabetes
+        WHERE pf.crp_level IS NULL;
+
+        ;WITH d3 AS (
+            SELECT gender, bmi_level, diabetes,
+                AVG(HbA1c_level) AS v_hba1c, AVG(CAST(hypertension AS FLOAT)) AS v_hyp,
+                AVG(CAST(heart_disease AS FLOAT)) AS v_hd
+            FROM silver.diabetes GROUP BY gender, bmi_level, diabetes
+        )
+        UPDATE pf SET
+            pf.HbA1c_level = COALESCE(pf.HbA1c_level, d3.v_hba1c),
+            pf.hypertension = COALESCE(pf.hypertension, d3.v_hyp),
+            pf.heart_disease = COALESCE(pf.heart_disease, d3.v_hd)
+        FROM gold.patient_flat pf
+        INNER JOIN d3 ON pf.gender = d3.gender AND pf.bmi_level = d3.bmi_level AND pf.diabetes = d3.diabetes
+        WHERE pf.HbA1c_level IS NULL;
+
+        -- Heart categorical Level 3 (high_blood_pressure, sugar_consumption)
+        ;WITH hc3 AS (
+            SELECT gender, bmi_level, diabetes, high_blood_pressure, sugar_consumption
+            FROM (
+                SELECT gender, bmi_level, diabetes, high_blood_pressure, sugar_consumption,
+                    ROW_NUMBER() OVER (PARTITION BY gender, bmi_level, diabetes ORDER BY COUNT(*) DESC) AS rn
+                FROM silver.heart GROUP BY gender, bmi_level, diabetes, high_blood_pressure, sugar_consumption
+            ) t WHERE rn = 1
+        )
+        UPDATE pf SET
+            pf.high_blood_pressure = COALESCE(pf.high_blood_pressure, hc3.high_blood_pressure),
+            pf.sugar_consumption = COALESCE(pf.sugar_consumption, hc3.sugar_consumption)
+        FROM gold.patient_flat pf
+        INNER JOIN hc3 ON pf.gender = hc3.gender AND pf.bmi_level = hc3.bmi_level AND pf.diabetes = hc3.diabetes
+        WHERE pf.high_blood_pressure IS NULL OR pf.sugar_consumption IS NULL;
+
+        PRINT '>> Level 3 (3-col match) done';
+
+        -- === LEVEL 4: Global mean/mode (last resort) ===
+
+        UPDATE gold.patient_flat SET crp_level = (SELECT AVG(crp_level) FROM silver.heart) WHERE crp_level IS NULL;
+        UPDATE gold.patient_flat SET blood_pressure = (SELECT AVG(blood_pressure) FROM silver.heart) WHERE blood_pressure IS NULL;
+        UPDATE gold.patient_flat SET homocysteine_level = (SELECT AVG(homocysteine_level) FROM silver.heart) WHERE homocysteine_level IS NULL;
+        UPDATE gold.patient_flat SET HbA1c_level = (SELECT AVG(HbA1c_level) FROM silver.diabetes) WHERE HbA1c_level IS NULL;
+        UPDATE gold.patient_flat SET hypertension = (SELECT AVG(CAST(hypertension AS FLOAT)) FROM silver.diabetes) WHERE hypertension IS NULL;
+        UPDATE gold.patient_flat SET heart_disease = (SELECT AVG(CAST(heart_disease AS FLOAT)) FROM silver.diabetes) WHERE heart_disease IS NULL;
+        UPDATE gold.patient_flat SET cholesterol = (SELECT AVG(cholesterol) FROM silver.heart) WHERE cholesterol IS NULL;
+        UPDATE gold.patient_flat SET sleep_hours = (SELECT AVG(sleep_hours) FROM silver.heart) WHERE sleep_hours IS NULL;
+        UPDATE gold.patient_flat SET triglycerides = (SELECT AVG(triglycerides) FROM silver.heart) WHERE triglycerides IS NULL;
+        UPDATE gold.patient_flat SET high_blood_pressure = (SELECT TOP 1 high_blood_pressure FROM silver.heart GROUP BY high_blood_pressure ORDER BY COUNT(*) DESC) WHERE high_blood_pressure IS NULL;
+        UPDATE gold.patient_flat SET sugar_consumption = (SELECT TOP 1 sugar_consumption FROM silver.heart GROUP BY sugar_consumption ORDER BY COUNT(*) DESC) WHERE sugar_consumption IS NULL;
+
+        PRINT '>> Level 4 (global fallback) done';
+        PRINT '>> Partial matching: ' + CAST(DATEDIFF(SECOND, @start_time, GETDATE()) AS NVARCHAR) + 's';
+
+
+        -- ============================================
+        -- CLEANUP temp tables
+        -- ============================================
+        DROP TABLE #d_num, #h_num, #h_cat, #hy_num, #hy_cat;
+
+
+        PRINT '==========================================';
+        PRINT 'Gold Layer Complete - ' + CAST(DATEDIFF(SECOND, @batch_start_time, GETDATE()) AS NVARCHAR) + 's total';
+        PRINT '==========================================';
+
+    END TRY
+    BEGIN CATCH
+        PRINT '==========================================';
+        PRINT 'ERROR: ' + ERROR_MESSAGE();
+        PRINT 'Error Number: ' + CAST(ERROR_NUMBER() AS NVARCHAR);
+        PRINT '==========================================';
+    END CATCH
+END
