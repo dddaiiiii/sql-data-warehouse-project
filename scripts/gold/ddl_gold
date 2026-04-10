@@ -1,0 +1,141 @@
+/*
+===============================================================================
+DDL: Gold Layer Tables
+Medallion Architecture - Medical Data Warehouse
+
+Star Schema:
+  dim_profile     → unique patient profiles (composite key breakdown)
+  dim_disease     → 4 disease classes
+  fact_patient    → all patients with measurements + FK to dimensions
+  patient_flat    → denormalized flat table for ML model
+
+Run order: drop fact first (FK constraint), then dimensions, then recreate all.
+===============================================================================
+*/
+
+-- Drop in FK-safe order
+IF OBJECT_ID('gold.patient_flat', 'U') IS NOT NULL DROP TABLE gold.patient_flat;
+IF OBJECT_ID('gold.fact_patient', 'U') IS NOT NULL DROP TABLE gold.fact_patient;
+IF OBJECT_ID('gold.dim_profile', 'U') IS NOT NULL DROP TABLE gold.dim_profile;
+IF OBJECT_ID('gold.dim_disease', 'U') IS NOT NULL DROP TABLE gold.dim_disease;
+GO
+
+
+-- Dimension: Profile (unique composite keys)
+CREATE TABLE gold.dim_profile (
+    profile_key     INT IDENTITY(1,1) PRIMARY KEY,
+    composite_key   NVARCHAR(100) NOT NULL UNIQUE,
+    age_level       NVARCHAR(10),       -- Young/Middle/Mature/Senior
+    gender          NVARCHAR(10),
+    bmi_level       NVARCHAR(20),
+    smoking         NVARCHAR(10),
+    diabetes        NVARCHAR(3)
+);
+GO
+
+-- Dimension: Disease (4 classes)
+CREATE TABLE gold.dim_disease (
+    disease_key         INT IDENTITY(1,1) PRIMARY KEY,
+    disease_category    NVARCHAR(20) NOT NULL UNIQUE
+);
+GO
+
+-- Fact: Patient (one row per patient, all measurements)
+CREATE TABLE gold.fact_patient (
+    patient_id          INT IDENTITY(1,1) PRIMARY KEY,
+    profile_key         INT NOT NULL,
+    disease_key         INT NOT NULL,
+    source_dataset      NVARCHAR(20),
+
+    -- Original + normalized age
+    age                 FLOAT,
+    age_normalized      FLOAT,
+    bmi                 FLOAT,
+
+    -- From Diabetes
+    hypertension        FLOAT,
+    heart_disease       FLOAT,
+    HbA1c_level         FLOAT,
+
+    -- Unified (exist in 2+ datasets)
+    glucose             FLOAT,
+    cholesterol         FLOAT,
+    sleep_hours         FLOAT,
+    triglycerides       FLOAT,
+    physical_activity   NVARCHAR(10),
+    family_history      NVARCHAR(3),
+    stress_level        NVARCHAR(10),
+    low_hdl_cholesterol NVARCHAR(3),
+    high_ldl_cholesterol NVARCHAR(3),
+
+    -- From Heart only
+    blood_pressure      FLOAT,
+    high_blood_pressure NVARCHAR(3),
+    sugar_consumption   NVARCHAR(10),
+    crp_level           FLOAT,
+    homocysteine_level  FLOAT,
+
+    -- From Hypertension only
+    systolic_bp         FLOAT,
+    diastolic_bp        FLOAT,
+    alcohol_intake      FLOAT,
+    salt_intake         FLOAT,
+    heart_rate          FLOAT,
+    hdl                 FLOAT,
+    ldl                 FLOAT,
+    education_level     NVARCHAR(20),
+    employment_status   NVARCHAR(20),
+
+    CONSTRAINT FK_fact_profile FOREIGN KEY (profile_key) REFERENCES gold.dim_profile(profile_key),
+    CONSTRAINT FK_fact_disease FOREIGN KEY (disease_key) REFERENCES gold.dim_disease(disease_key)
+);
+GO
+
+-- Flat Table: denormalized for ML (built from star schema)
+CREATE TABLE gold.patient_flat (
+    -- Profile columns
+    composite_key       NVARCHAR(100),
+    age_level           NVARCHAR(10),
+    gender              NVARCHAR(10),
+    bmi_level           NVARCHAR(20),
+    smoking             NVARCHAR(10),
+    diabetes            NVARCHAR(3),
+
+    -- Age + BMI
+    age                 FLOAT,
+    age_normalized      FLOAT,
+    bmi                 FLOAT,
+
+    -- All measurements
+    hypertension        FLOAT,
+    heart_disease       FLOAT,
+    HbA1c_level         FLOAT,
+    glucose             FLOAT,
+    cholesterol         FLOAT,
+    sleep_hours         FLOAT,
+    triglycerides       FLOAT,
+    physical_activity   NVARCHAR(10),
+    family_history      NVARCHAR(3),
+    stress_level        NVARCHAR(10),
+    low_hdl_cholesterol NVARCHAR(3),
+    high_ldl_cholesterol NVARCHAR(3),
+    blood_pressure      FLOAT,
+    high_blood_pressure NVARCHAR(3),
+    sugar_consumption   NVARCHAR(10),
+    crp_level           FLOAT,
+    homocysteine_level  FLOAT,
+    systolic_bp         FLOAT,
+    diastolic_bp        FLOAT,
+    alcohol_intake      FLOAT,
+    salt_intake         FLOAT,
+    heart_rate          FLOAT,
+    hdl                 FLOAT,
+    ldl                 FLOAT,
+    education_level     NVARCHAR(20),
+    employment_status   NVARCHAR(20),
+
+    -- Target + source
+    disease_category    NVARCHAR(20),
+    source_dataset      NVARCHAR(20)
+);
+GO
