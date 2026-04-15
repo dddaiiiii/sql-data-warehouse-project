@@ -5,27 +5,28 @@ Medallion Architecture - Medical Data Warehouse
 
 Star Schema:
   dim_profile     → unique patient profiles (composite key breakdown)
-  dim_disease     → 4 disease classes
-  fact_patient    → all patients with measurements + FK to dimensions
+  dim_disease     → 4 disease classes (per-dataset target)
+  dim_sublabel    → 8 disease combinations (DI,HT,HY flags)
+  fact_patient    → all patients with measurements + FK to all dimensions
   patient_flat    → denormalized flat table for ML model
 
-Run order: drop fact first (FK constraint), then dimensions, then recreate all.
+Drop order: flat → fact → dimensions.
 ===============================================================================
 */
 
--- Drop in FK-safe order
 IF OBJECT_ID('gold.patient_flat', 'U') IS NOT NULL DROP TABLE gold.patient_flat;
 IF OBJECT_ID('gold.fact_patient', 'U') IS NOT NULL DROP TABLE gold.fact_patient;
 IF OBJECT_ID('gold.dim_profile', 'U') IS NOT NULL DROP TABLE gold.dim_profile;
 IF OBJECT_ID('gold.dim_disease', 'U') IS NOT NULL DROP TABLE gold.dim_disease;
+IF OBJECT_ID('gold.dim_sublabel', 'U') IS NOT NULL DROP TABLE gold.dim_sublabel;
 GO
 
 
--- Dimension: Profile (unique composite keys)
+-- Dimension: Profile
 CREATE TABLE gold.dim_profile (
     profile_key     INT IDENTITY(1,1) PRIMARY KEY,
     composite_key   NVARCHAR(100) NOT NULL UNIQUE,
-    age_level       NVARCHAR(10),       -- Young/Middle/Mature/Senior
+    age_level       NVARCHAR(10),
     gender          NVARCHAR(10),
     bmi_level       NVARCHAR(20),
     smoking         NVARCHAR(10),
@@ -33,21 +34,33 @@ CREATE TABLE gold.dim_profile (
 );
 GO
 
--- Dimension: Disease (4 classes)
+-- Dimension: Disease (per-dataset target)
 CREATE TABLE gold.dim_disease (
     disease_key         INT IDENTITY(1,1) PRIMARY KEY,
     disease_category    NVARCHAR(20) NOT NULL UNIQUE
 );
 GO
 
--- Fact: Patient (one row per patient, all measurements)
+-- Dimension: Sublabel (8 disease flag combinations)
+CREATE TABLE gold.dim_sublabel (
+    sublabel_key    INT IDENTITY(1,1) PRIMARY KEY,
+    disease_flags   NVARCHAR(10) NOT NULL UNIQUE,  -- '1,0,1'
+    has_diabetes    INT NOT NULL,                    -- 0 or 1
+    has_heart       INT NOT NULL,                    -- 0 or 1
+    has_hypertension INT NOT NULL,                   -- 0 or 1
+    sublabel        NVARCHAR(15) NOT NULL,          -- DI, HT, HY, DI_HT, etc.
+    label           NVARCHAR(10) NOT NULL            -- Normal or Abnormal
+);
+GO
+
+-- Fact: Patient
 CREATE TABLE gold.fact_patient (
     patient_id          INT IDENTITY(1,1) PRIMARY KEY,
     profile_key         INT NOT NULL,
     disease_key         INT NOT NULL,
     source_dataset      NVARCHAR(20),
 
-    -- Original + normalized age
+    -- Age + BMI
     age                 FLOAT,
     age_normalized      FLOAT,
     bmi                 FLOAT,
@@ -57,7 +70,7 @@ CREATE TABLE gold.fact_patient (
     heart_disease       FLOAT,
     HbA1c_level         FLOAT,
 
-    -- Unified (exist in 2+ datasets)
+    -- Unified (2+ datasets)
     glucose             FLOAT,
     cholesterol         FLOAT,
     sleep_hours         FLOAT,
@@ -68,14 +81,14 @@ CREATE TABLE gold.fact_patient (
     low_hdl_cholesterol NVARCHAR(3),
     high_ldl_cholesterol NVARCHAR(3),
 
-    -- From Heart only
+    -- Heart only
     blood_pressure      FLOAT,
     high_blood_pressure NVARCHAR(3),
     sugar_consumption   NVARCHAR(10),
     crp_level           FLOAT,
     homocysteine_level  FLOAT,
 
-    -- From Hypertension only
+    -- Hypertension only
     systolic_bp         FLOAT,
     diastolic_bp        FLOAT,
     alcohol_intake      FLOAT,
@@ -86,14 +99,18 @@ CREATE TABLE gold.fact_patient (
     education_level     NVARCHAR(20),
     employment_status   NVARCHAR(20),
 
+    -- Disease classification (FK to dim_sublabel)
+    sublabel_key        INT NOT NULL,
+
     CONSTRAINT FK_fact_profile FOREIGN KEY (profile_key) REFERENCES gold.dim_profile(profile_key),
-    CONSTRAINT FK_fact_disease FOREIGN KEY (disease_key) REFERENCES gold.dim_disease(disease_key)
+    CONSTRAINT FK_fact_disease FOREIGN KEY (disease_key) REFERENCES gold.dim_disease(disease_key),
+    CONSTRAINT FK_fact_sublabel FOREIGN KEY (sublabel_key) REFERENCES gold.dim_sublabel(sublabel_key)
 );
 GO
 
--- Flat Table: denormalized for ML (built from star schema)
+-- Flat Table: for ML
 CREATE TABLE gold.patient_flat (
-    -- Profile columns
+    -- Profile
     composite_key       NVARCHAR(100),
     age_level           NVARCHAR(10),
     gender              NVARCHAR(10),
@@ -134,8 +151,10 @@ CREATE TABLE gold.patient_flat (
     education_level     NVARCHAR(20),
     employment_status   NVARCHAR(20),
 
-    -- Target + source
-    disease_category    NVARCHAR(20),
-    source_dataset      NVARCHAR(20)
+    -- Classification
+    source_dataset      NVARCHAR(20),
+    disease_flags       NVARCHAR(10),
+    sublabel            NVARCHAR(15),
+    label               NVARCHAR(10)
 );
 GO
