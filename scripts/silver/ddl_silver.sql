@@ -1,95 +1,101 @@
 /*
-DDL Script: Create Silver Tables
+===============================================================================
+DDL: Silver Layer Tables
+Medallion Architecture - Medical Data Warehouse
+
+Age handling:
+  - Diabetes scaled ages (0.08-1.88) → inverse-scaled to real years (2-80)
+  - All ages normalized to 0-1 (global min=2, max=89)
+  - Binned into 4 groups based on normalized range
+===============================================================================
 */
 
--- =============================================
--- 1. DIABETES
--- =============================================
-IF OBJECT_ID('silver.diabetes', 'U') IS NOT NULL
-    DROP TABLE silver.diabetes;
+-- 1. Diabetes
+IF OBJECT_ID('silver.diabetes', 'U') IS NOT NULL DROP TABLE silver.diabetes;
 GO
-
 CREATE TABLE silver.diabetes (
-    diabetes_id         INT IDENTITY(1,1) PRIMARY KEY,
-    gender              VARCHAR(20),
-    age                 FLOAT,
+    gender              NVARCHAR(10),
+    age                 FLOAT,          -- real age in years
+    age_normalized      FLOAT,          -- 0-1 (global min=2, max=89)
+    age_level           NVARCHAR(10),   -- Young/Middle/Mature/Senior
+    bmi                 FLOAT,
+    bmi_level           NVARCHAR(20),
+    smoking             NVARCHAR(10),
+    diabetes            NVARCHAR(3),
+    composite_key       NVARCHAR(100),
     hypertension        INT,
     heart_disease       INT,
-    smoking_history     VARCHAR(30),
-    bmi                 FLOAT,
-    hba1c_level         FLOAT,
-    blood_glucose_level INT,
-    diabetes            INT,
-    disease_category    VARCHAR(20)
+    HbA1c_level         FLOAT,
+    glucose             INT,
+    disease_flags       NVARCHAR(10),   -- (DI,HT,HY) e.g. '1,0,1'
+    disease_category    NVARCHAR(20)
 );
 GO
 
--- =============================================
--- 2. HEART
--- =============================================
-IF OBJECT_ID('silver.heart', 'U') IS NOT NULL
-    DROP TABLE silver.heart;
+-- 2. Heart
+IF OBJECT_ID('silver.heart', 'U') IS NOT NULL DROP TABLE silver.heart;
 GO
-
 CREATE TABLE silver.heart (
-    heart_id             INT IDENTITY(1,1) PRIMARY KEY,
-    gender               VARCHAR(10),
-    age                  FLOAT,
-    blood_pressure       FLOAT,
-    cholesterol_level    FLOAT,
-    exercise_habits      VARCHAR(20),
-    smoking              VARCHAR(10),
-    family_heart_disease VARCHAR(10),
-    diabetes             VARCHAR(10),
-    bmi                  FLOAT,
-    high_blood_pressure  VARCHAR(10),
-    hdl_status           VARCHAR(10),   -- low_hdl_cholesterol (Yes/No → Good/Poor)
-    ldl_status           VARCHAR(10),   -- high_ldl_cholesterol (Yes/No → Normal/High)
-    alcohol_consumption  VARCHAR(20),
-    stress_level         VARCHAR(10),   -- (High/Medium/Low)
-    sleep_hours          FLOAT,
-    sugar_consumption    VARCHAR(20),
-    triglyceride_level   FLOAT,
-    fasting_blood_sugar  FLOAT,
-    crp_level            FLOAT,
-    homocysteine_level   FLOAT,
-    heart_disease_status VARCHAR(10),
-    disease_category     VARCHAR(20)
+    gender              NVARCHAR(10),
+    age                 FLOAT,
+    age_normalized      FLOAT,
+    age_level           NVARCHAR(10),
+    bmi                 FLOAT,
+    bmi_level           NVARCHAR(20),
+    smoking             NVARCHAR(10),
+    diabetes            NVARCHAR(3),
+    composite_key       NVARCHAR(100),
+    cholesterol         FLOAT,
+    physical_activity   NVARCHAR(10),
+    family_history      NVARCHAR(3),
+    stress_level        NVARCHAR(10),
+    sleep_hours         FLOAT,
+    triglycerides       FLOAT,
+    glucose             FLOAT,
+    low_hdl_cholesterol NVARCHAR(3),
+    high_ldl_cholesterol NVARCHAR(3),
+    blood_pressure      FLOAT,
+    high_blood_pressure NVARCHAR(3),
+    sugar_consumption   NVARCHAR(10),
+    crp_level           FLOAT,
+    homocysteine_level  FLOAT,
+    disease_flags       NVARCHAR(10),   -- (DI,HT,HY) e.g. '0,1,0'
+    disease_category    NVARCHAR(20)
 );
 GO
 
--- =============================================
--- 3. HYPERTENSION
--- =============================================
-IF OBJECT_ID('silver.hypertension', 'U') IS NOT NULL
-    DROP TABLE silver.hypertension;
+-- 3. Hypertension
+IF OBJECT_ID('silver.hypertension', 'U') IS NOT NULL DROP TABLE silver.hypertension;
 GO
-
 CREATE TABLE silver.hypertension (
-    hypertension_id         INT IDENTITY(1,1) PRIMARY KEY,
-    country                 VARCHAR(50),
-    age                     INT,
-    bmi                     FLOAT,
-    cholesterol             INT,
-    systolic_bp             INT,
-    diastolic_bp            INT,
-    smoking_status          VARCHAR(20),
-    alcohol_intake          FLOAT,
-    physical_activity_level VARCHAR(20),
-    family_history          VARCHAR(10),
-    diabetes                VARCHAR(10),
-    stress_level            VARCHAR(10), --(1-9 → Low/Medium/High)
-    salt_intake             FLOAT,
-    sleep_duration          FLOAT,
-    heart_rate              INT,
-    ldl_status              VARCHAR(10), -- (< 100 → Normal / >= 100 → High)
-    hdl_status              VARCHAR(10), -- (>= 60 → Good / < 60 → Poor)
-    triglycerides           INT,
-    glucose                 INT,
-    gender                  VARCHAR(10),
-    education_level         VARCHAR(20),
-    employment_status       VARCHAR(20),
-    hypertension            VARCHAR(10),
-    disease_category        VARCHAR(20)
+    gender              NVARCHAR(10),
+    age                 INT,
+    age_normalized      FLOAT,
+    age_level           NVARCHAR(10),
+    bmi                 FLOAT,
+    bmi_level           NVARCHAR(20),
+    smoking             NVARCHAR(10),
+    diabetes            NVARCHAR(3),
+    composite_key       NVARCHAR(100),
+    cholesterol         INT,
+    physical_activity   NVARCHAR(10),
+    family_history      NVARCHAR(3),
+    stress_level        NVARCHAR(10),
+    sleep_hours         FLOAT,
+    triglycerides       INT,
+    glucose             INT,
+    low_hdl_cholesterol NVARCHAR(3),
+    high_ldl_cholesterol NVARCHAR(3),
+    systolic_bp         INT,
+    diastolic_bp        INT,
+    alcohol_intake      FLOAT,
+    salt_intake         FLOAT,
+    heart_rate          INT,
+    hdl                 INT,
+    ldl                 INT,
+    education_level     NVARCHAR(20),
+    employment_status   NVARCHAR(20),
+    disease_flags       NVARCHAR(10),   -- (DI,HT,HY) e.g. '0,0,1'. HT always 0 (no heart data)
+    disease_category    NVARCHAR(20)
 );
 GO
